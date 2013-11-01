@@ -1,0 +1,149 @@
+- defaults:
+    name: global
+    zuul-url: http://127.0.0.1:8001/jenkins_endpoint
+- job-template:
+    name: '{openstack_version}-{test_type}-integration-tests'
+    node: dmz_openstack
+    defaults: global
+    triggers:
+      - zuul
+      - timed: '@daily'
+    builders:
+      - shell: |
+          #!/bin/bash
+          #
+          # script to build a two node environment and test.
+          #
+          
+          #set -e
+          
+          build_dir="$WORKSPACE/$BUILD_ID"
+
+          openstack_installer_remote=CiscoSystems
+          openstack_installer_branch=master
+          openstack_version={openstack_version}
+          test_type={test_type}
+          
+          mkdir -p $build_dir
+          
+          cd $build_dir
+
+          curl -O https://pypi.python.org/packages/source/v/virtualenv/virtualenv-1.10.1.tar.gz
+          tar xvfz virtualenv-1.10.1.tar.gz
+          cd virtualenv-1.10.1
+          python virtualenv.py test
+          cd test
+          source bin/activate
+          pip install python-novaclient==2.14.1
+          pip install python-quantumclient==2.2.3
+          pip install python-keystoneclient==0.3.2
+          pip install PyYaml
+          
+          source /home/jenkins/installer_credentials/openrc
+          
+          git clone "https://github.com/${{openstack_installer_remote}}/openstack-installer"
+          
+          cd openstack-installer
+          
+          export PATH=`pwd`/stack-builder/bin:$PATH
+          export PYTHONPATH=`pwd`/stack-builder:$PYTHONPATH
+          
+          chown -R jenkins.jenkins *
+          
+          git checkout origin/${{openstack_installer_branch}}
+          
+          export osi_conf_git_protocol=git
+          
+          export osi_user_internal_ip='%{{ipaddress_eth1}}'
+          export osi_user_tunnel_ip='%{{ipaddress_eth1}}'
+          
+          export osi_conf_initial_ntp=ntp.esl.cisco.com
+          export osi_conf_installer_repo=$openstack_installer_remote
+          export osi_conf_installer_branch=$openstack_installer_branch
+          export osi_conf_operatingsystem=Ubuntu
+          export osi_conf_build_server_domain_name=domain.name
+          export osi_conf_openstack_version=$openstack_version
+          export osi_conf_apt_mirror_ip=192.168.26.170
+          export osi_user_debug=false
+          
+          export osi_conf_apt_proxy_host=192.168.26.170
+          export osi_conf_apt_proxy_port=8000
+
+          export ref=`echo $ZUUL_CHANGES | awk -F":" '{print $3}'`
+          export cherry_pick_command="git fetch https://github.com/$ZUUL_PROJECT $ref && git cherry-pick FETCH_HEAD"
+
+          # get the name of the directory where we need to change code
+          export osi_conf_zuul_project=`echo $ZUUL_PROJECT | sed -e "s/stackforge\/puppet-//g"`
+          export osi_conf_checkout_branch_command="${cherry_pick_command:-}"
+          
+          # bash variables can't have colons, so do this via yaml
+          echo "coe::base::openstack_release: $openstack_version" >> data/hiera_data/user.yaml
+          echo "nova::compute::vncserver_proxyclient_address: '%{{ipaddress_eth1}}'" >> data/hiera_data/user.yaml
+          # Grizzly uses quantum rather than the default of neutron
+          if [ $openstack_version = 'grizzly' ];then
+            export osi_glob_network_service=quantum
+          fi
+          
+          
+          if [ $test_type = 'tempest' ]; then
+            export osi_glob_install_tempest=true
+          
+            echo "openstack::provision::configure_tempest: true" >> data/hiera_data/user.yaml
+            #echo "openstack::provision::identity_uri: 'http://127.0.0.1:5000/v2.0/'" >> data/hiera_data/user.yaml
+            #echo "openstack::provision::admin_tenant_name: openstack" >> data/hiera_data/user.yaml
+            #echo "openstack::provision::admin_password: Cisco123" >> data/hiera_data/user.yaml
+            #echo "openstack::provision::resize_available: false" >> data/hiera_data/user.yaml
+            #echo "openstack::provision::change_password_available: false" >> data/hiera_data/user.yaml
+            #echo "openstack::provision::public_network_name: nova" >> data/hiera_data/user.yaml
+          fi
+          
+          if [ $test_type = 'smoke' ]; then
+            export osi_glob_install_tempest=true
+            echo "openstack::provision::configure_tempest: true" >> data/hiera_data/user.yaml
+          fi
+          
+          export TEST_ID=`sb make -a 192.168.26.186 -n public -i precise`
+          echo "test id:" $TEST_ID
+          sleep 10
+          sb get -t $TEST_ID
+          echo "waiting for build..."
+          sb wait -t $TEST_ID
+          echo "running tests"
+          
+          if [ $test_type = 'basic_test' ]; then
+          ssh -i /home/jenkins/installer_credentials/test2.private -o StrictHostKeyChecking=no root@`sb get -t $TEST_ID | grep control | cut -d ' ' -f 1` 'ifconfig br-ex 172.16.2.1 netmask 255.255.255.0 up'
+          ssh -i /home/jenkins/installer_credentials/test2.private -o StrictHostKeyChecking=no root@`sb get -t $TEST_ID | grep control | cut -d ' ' -f 1` '/tmp/test_nova.sh'
+          fi
+          
+          if [ $test_type = 'tempest' ]; then
+            ssh -i /home/jenkins/installer_credentials/test2.private -o StrictHostKeyChecking=no root@`sb get -t $TEST_ID | grep control | cut -d ' ' -f 1` 'ifconfig br-ex 172.24.4.238 netmask 255.255.255.240 up'
+            ssh -i /home/jenkins/installer_credentials/test2.private -o StrictHostKeyChecking=no root@`sb get -t $TEST_ID | grep control | cut -d ' ' -f 1` 'cd /var/lib/tempest/;./run_tests.sh -V'
+          fi
+          
+          
+          if [ $test_type = 'smoke' ]; then
+            ssh -i /home/jenkins/installer_credentials/test2.private -o StrictHostKeyChecking=no root@`sb get -t $TEST_ID | grep control | cut -d ' ' -f 1` 'ifconfig br-ex 172.24.4.238 netmask 255.255.255.240 up'
+            ssh -i /home/jenkins/installer_credentials/test2.private -o StrictHostKeyChecking=no root@`sb get -t $TEST_ID | grep control | cut -d ' ' -f 1` 'cd /var/lib/tempest/;./run_tests.sh -V -s'
+          fi
+          
+          export TEST_RETURN=$?
+          echo "collecting logs"
+          sb log -t $TEST_ID
+          cat *.log
+          echo "Destroying test resources"
+          
+          if [ $cleanup = 'true' ]; then
+            sb kill -t $TEST_ID
+          fi
+          
+          exit $TEST_RETURN
+                
+- project:
+    name: cisco-openstack-tests
+    openstack_version:
+      - havana
+    test_type:
+      - basic_test
+      - smoke
+    jobs:
+      - '{openstack_version}-{test_type}-integration-tests'
