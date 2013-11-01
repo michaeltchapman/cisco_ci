@@ -69,12 +69,12 @@
           export osi_conf_apt_proxy_host=192.168.26.170
           export osi_conf_apt_proxy_port=8000
 
-          export ref=`echo $ZUUL_CHANGES | awk -F":" '{print $3}'`
-          export cherry_pick_command="git fetch https://github.com/$ZUUL_PROJECT $ref && git cherry-pick FETCH_HEAD"
+          export ref=`echo $ZUUL_CHANGES | cut -d ':' -f 3`
+          export cherry_pick_command="git fetch https://review.openstack.org/$ZUUL_PROJECT $ref && git cherry-pick FETCH_HEAD"
 
           # get the name of the directory where we need to change code
           export osi_conf_zuul_project=`echo $ZUUL_PROJECT | sed -e "s/stackforge\/puppet-//g"`
-          export osi_conf_checkout_branch_command="${cherry_pick_command:-}"
+          export osi_conf_checkout_branch_command="${{cherry_pick_command:-}}"
           
           # bash variables can't have colons, so do this via yaml
           echo "coe::base::openstack_release: $openstack_version" >> data/hiera_data/user.yaml
@@ -108,6 +108,11 @@
           sb get -t $TEST_ID
           echo "waiting for build..."
           sb wait -t $TEST_ID
+
+          echo "collecting logs"
+          sb log -t $TEST_ID
+          cat *.log
+
           echo "running tests"
           
           if [ $test_type = 'basic_test' ]; then
@@ -127,14 +132,9 @@
           fi
           
           export TEST_RETURN=$?
-          echo "collecting logs"
-          sb log -t $TEST_ID
-          cat *.log
           echo "Destroying test resources"
           
-          if [ $cleanup = 'true' ]; then
-            sb kill -t $TEST_ID
-          fi
+          sb kill -t $TEST_ID
           
           exit $TEST_RETURN
                 
@@ -145,5 +145,7 @@
     test_type:
       - basic_test
       - smoke
+    cleanup:
+      - true
     jobs:
       - '{openstack_version}-{test_type}-integration-tests'
